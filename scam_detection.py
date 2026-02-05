@@ -1,13 +1,6 @@
 SCAM_KEYWORDS = [
-    "urgent",
-    "verify",
-    "blocked",
-    "suspended",
-    "upi",
-    "otp",
-    "bank",
-    "click",
-    "link"
+    "blocked", "verify", "urgent", "account",
+    "upi", "bank", "suspended", "immediately"
 ]
 
 def is_scam(text: str) -> bool:

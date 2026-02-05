@@ -1,113 +1,53 @@
-from fastapi import FastAPI, Depends, BackgroundTasks
-from pydantic import BaseModel
-from typing import List, Dict, Optional
+from fastapi import FastAPI, Request, Header, HTTPException
+from memory import add_message, get_turn_count, get_conversation
+from scam_detection import is_scam
+from agent import generate_reply
+from intelligence import extract_intelligence
+from callback import send_callback
+import os
 
-from auth import verify_api_key
-from detector import is_scam
-from agent import generate_agent_reply
-from extractor import extract_intelligence
-from callback import send_guvi_callback
+app = FastAPI()
 
-app = FastAPI(title="Agentic Honeypot API")
+API_KEY = os.getenv("API_KEY")
 
-# =========================
-# IN-MEMORY SESSION STORE
-# =========================
-sessions: Dict[str, Dict] = {}
-
-# =========================
-# REQUEST MODELS
-# =========================
-class Message(BaseModel):
-    sender: str
-    text: str
-    timestamp: int
-
-class HoneypotRequest(BaseModel):
-    sessionId: str
-    message: Message
-    conversationHistory: List[dict] = []
-    metadata: Optional[dict] = None
-
-# =========================
-# CONSTANTS
-# =========================
-MIN_MESSAGES_FOR_CALLBACK = 5
-
-# =========================
-# MAIN ENDPOINT
-# =========================
 @app.post("/honeypot")
-def honeypot(
-    data: HoneypotRequest,
-    background_tasks: BackgroundTasks,
-    _=Depends(verify_api_key)
+async def honeypot(
+    request: Request,
+    x_api_key: str = Header(None)
 ):
-    # -------------------------
-    # Initialize session
-    # -------------------------
-    if data.sessionId not in sessions:
-        sessions[data.sessionId] = {
-            "totalMessages": 0,
-            "scamDetected": False,
-            "callbackSent": False,
-            "intelligence": {
-                "bankAccounts": [],
-                "upiIds": [],
-                "phishingLinks": [],
-                "phoneNumbers": [],
-                "suspiciousKeywords": []
-            }
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    body = await request.json()
+
+    session_id = body["sessionId"]
+    msg = body["message"]
+    sender = msg["sender"]
+    text = msg["text"]
+
+    add_message(session_id, sender, text)
+
+    if is_scam(text):
+        turn = get_turn_count(session_id)
+        reply = generate_reply(turn)
+        add_message(session_id, "user", reply)
+
+        # Send callback only after meaningful engagement
+        if turn >= 3:
+            intelligence = extract_intelligence(text)
+            send_callback(
+                session_id,
+                len(get_conversation(session_id)),
+                intelligence
+            )
+
+        # 🔒 AUTOMATED TESTER RESPONSE (STRICT)
+        return {
+            "status": "success",
+            "reply": reply
         }
 
-    session = sessions[data.sessionId]
-
-    # -------------------------
-    # Engagement depth (SINGLE SOURCE OF TRUTH)
-    # -------------------------
-    session["totalMessages"] += 1
-
-    # -------------------------
-    # Scam detection
-    # -------------------------
-    if data.message.sender.lower() == "scammer" or is_scam(data.message.text):
-        session["scamDetected"] = True
-
-    # -------------------------
-    # Intelligence extraction
-    # -------------------------
-    intel = extract_intelligence(data.message.text)
-    for key in session["intelligence"]:
-        for value in intel.get(key, []):
-            if value not in session["intelligence"][key]:
-                session["intelligence"][key].append(value)
-
-    # -------------------------
-    # Agent reply
-    # -------------------------
-    reply = generate_agent_reply(data.conversationHistory)
-
-    # -------------------------
-    # GUVI callback (NON-BLOCKING, SAFE)
-    # -------------------------
-    if (
-        session["scamDetected"]
-        and session["totalMessages"] >= MIN_MESSAGES_FOR_CALLBACK
-        and not session["callbackSent"]
-    ):
-        background_tasks.add_task(
-            send_guvi_callback,
-            data.sessionId,
-            session["scamDetected"],
-            session["totalMessages"],   # ✅ CORRECT
-            session["intelligence"]
-        )
-        session["callbackSent"] = True
-
-    # -------------------------
-    # Immediate response
-    # -------------------------
     return {
         "status": "success",
-        "reply": reply
+        "reply": "Okay."
     }
